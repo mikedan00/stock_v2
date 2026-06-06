@@ -208,7 +208,6 @@ with st.expander("📁 파일 업로드 — Excel, PDF, Word, PPT, TXT, HWP, 이
         btn_process_files = st.button("📂 파일 분석 & RAG 추가", use_container_width=True,
                                       disabled=not uploaded_files)
     with col_f2:
-        rag_count = get_rag().doc_count if "rag_engine" not in dir() else 0
         try:
             from rag.rag_engine import get_rag
             st.markdown(f"<span style='color:#64b5f6;font-size:.83rem;'>📚 RAG 인덱스: {get_rag().doc_count}개 청크</span>",
