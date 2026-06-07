@@ -635,16 +635,12 @@ if st.session_state.data_loaded and st.session_state.stocks_data:
                 if btn_word:
                     with st.spinner("📄 Word 파일 생성 중..."):
                         try:
-                            from exporters.word_exporter import export_word
-                            out_path = f"/tmp/stock_briefing_{date.today()}.docx"
-                            export_word(
+                            from exporters.word_exporter import export_word_bytes
+                            word_bytes = export_word_bytes(
                                 report_text=st.session_state.full_report,
                                 stocks=st.session_state.stocks_data,
                                 persona_label=f"{persona['emoji']} {persona['label']}",
-                                output_path=out_path,
                             )
-                            with open(out_path, "rb") as f:
-                                word_bytes = f.read()
                             st.download_button(
                                 "⬇️ Word 다운로드",
                                 data=word_bytes,
@@ -653,10 +649,10 @@ if st.session_state.data_loaded and st.session_state.stocks_data:
                                 use_container_width=True,
                                 key="dl_word",
                             )
-                            st.success("✅ Word 파일 생성 완료!")
+                            st.success("✅ Word 파일 생성 완료! (python-docx 기반)")
                         except Exception as e:
                             st.error(f"Word 생성 오류: {e}")
-                            st.info("💡 Node.js와 docx 패키지가 필요합니다: npm install -g docx")
+                            st.info("pip install python-docx 를 실행하세요.")
 
             # ── PPT 내보내기
             with col_p:
@@ -676,18 +672,14 @@ if st.session_state.data_loaded and st.session_state.stocks_data:
                 if btn_ppt:
                     with st.spinner("📊 PPT 파일 생성 중..."):
                         try:
-                            from exporters.ppt_exporter import export_ppt
-                            out_path = f"/tmp/stock_briefing_{date.today()}.pptx"
-                            export_ppt(
+                            from exporters.ppt_exporter import export_ppt_bytes
+                            ppt_bytes = export_ppt_bytes(
                                 stocks=st.session_state.stocks_data,
                                 stock_briefs=list(st.session_state.stock_briefs.values()),
                                 portfolio_brief=st.session_state.portfolio_brief,
                                 persona_label=persona['label'],
                                 persona_emoji=persona['emoji'],
-                                output_path=out_path,
                             )
-                            with open(out_path, "rb") as f:
-                                ppt_bytes = f.read()
                             st.download_button(
                                 "⬇️ PPT 다운로드",
                                 data=ppt_bytes,
@@ -696,10 +688,10 @@ if st.session_state.data_loaded and st.session_state.stocks_data:
                                 use_container_width=True,
                                 key="dl_ppt",
                             )
-                            st.success("✅ PPT 파일 생성 완료!")
+                            st.success("✅ PPT 파일 생성 완료! (python-pptx 기반)")
                         except Exception as e:
                             st.error(f"PPT 생성 오류: {e}")
-                            st.info("💡 Node.js와 pptxgenjs 패키지가 필요합니다: npm install -g pptxgenjs")
+                            st.info("pip install python-pptx 를 실행하세요.")
 
             # TXT 백업 다운로드 (항상 가능)
             st.markdown("---")

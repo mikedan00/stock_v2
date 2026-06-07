@@ -1,21 +1,298 @@
 """
 exporters/ppt_exporter.py
-요약본을 PPT(.pptx)로 내보내기 — pptxgenjs npm 패키지 사용
+python-pptx 기반 PPT(.pptx) 내보내기 — Node.js 불필요
 """
 from __future__ import annotations
-import os, subprocess, tempfile
+import io
 from datetime import date
 
+from pptx import Presentation
+from pptx.util import Inches, Pt, Emu
+from pptx.dml.color import RGBColor
+from pptx.enum.text import PP_ALIGN
 
-def _safe(text: str, limit: int = 300) -> str:
-    return (str(text) or "")[:limit].replace("`", "'").replace("\\", "\\\\").replace("${", "\\${").replace("\n", " ")
+
+# ── 색상 ──────────────────────────────────────────────────────────────────────
+NAVY   = RGBColor(0x0D, 0x1B, 0x4B)
+BLUE   = RGBColor(0x15, 0x65, 0xC0)
+LBLUE  = RGBColor(0x42, 0xA5, 0xF5)
+WHITE  = RGBColor(0xFF, 0xFF, 0xFF)
+GOLD   = RGBColor(0xFF, 0xD5, 0x4F)
+GRAY   = RGBColor(0x54, 0x6E, 0x7A)
+LGRAY  = RGBColor(0x90, 0xA4, 0xAE)
+RED    = RGBColor(0xEF, 0x53, 0x50)
+GREEN  = RGBColor(0x66, 0xBB, 0x6A)
+BG     = RGBColor(0xF8, 0xFA, 0xFF)
+DARK   = RGBColor(0x1A, 0x23, 0x7E)
+
+W = Inches(10)   # 슬라이드 너비
+H = Inches(5.625)  # 슬라이드 높이
 
 
-def _change_color(change) -> str:
-    if change is None:
-        return "90A4AE"
-    return "EF5350" if change > 0 else "42A5F5" if change < 0 else "90A4AE"
+# ── 헬퍼 ─────────────────────────────────────────────────────────────────────
 
+def _bg(slide, color: RGBColor):
+    """슬라이드 배경색 설정."""
+    from pptx.oxml.ns import qn
+    from lxml import etree
+    bg = slide.background
+    fill = bg.fill
+    fill.solid()
+    fill.fore_color.rgb = color
+
+
+def _box(slide, x, y, w, h, text="", font_size=18, bold=False,
+         color=WHITE, bg_color=None, align=PP_ALIGN.LEFT, italic=False):
+    """텍스트 박스 추가."""
+    txBox = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
+    tf = txBox.text_frame
+    tf.word_wrap = True
+    p = tf.paragraphs[0]
+    p.alignment = align
+    run = p.add_run()
+    run.text = str(text)
+    run.font.size = Pt(font_size)
+    run.font.bold = bold
+    run.font.italic = italic
+    run.font.color.rgb = color
+    if bg_color:
+        from pptx.util import Pt as _Pt
+        txBox.fill.solid()
+        txBox.fill.fore_color.rgb = bg_color
+    return txBox
+
+
+def _rect(slide, x, y, w, h, color: RGBColor):
+    """색상 사각형 추가."""
+    from pptx.util import Inches as I
+    shape = slide.shapes.add_shape(
+        1,  # MSO_SHAPE_TYPE.RECTANGLE
+        I(x), I(y), I(w), I(h)
+    )
+    shape.fill.solid()
+    shape.fill.fore_color.rgb = color
+    shape.line.fill.background()
+    return shape
+
+
+def _multiline_box(slide, x, y, w, h, lines: list[tuple],
+                   default_size=12, default_color=WHITE):
+    """
+    여러 줄 텍스트박스.
+    lines: [(text, bold, font_size, color), ...]
+    """
+    txBox = slide.shapes.add_textbox(Inches(x), Inches(y), Inches(w), Inches(h))
+    tf = txBox.text_frame
+    tf.word_wrap = True
+    first = True
+    for (text, bold, fsize, fcolor) in lines:
+        if first:
+            p = tf.paragraphs[0]
+            first = False
+        else:
+            p = tf.add_paragraph()
+        p.space_after = Pt(2)
+        run = p.add_run()
+        run.text = str(text)[:200]
+        run.font.size = Pt(fsize or default_size)
+        run.font.bold = bool(bold)
+        run.font.color.rgb = fcolor or default_color
+    return txBox
+
+
+def _change_color(change) -> RGBColor:
+    if change is None: return LGRAY
+    return RED if change > 0 else LBLUE if change < 0 else LGRAY
+
+
+def _clean(text: str, limit: int = 200) -> str:
+    return text.replace("**", "").replace("##", "").strip()[:limit]
+
+
+# ── 슬라이드 생성 함수 ────────────────────────────────────────────────────────
+
+def _slide_cover(prs, today, persona_label, persona_emoji):
+    slide = prs.slides.add_slide(prs.slide_layouts[6])  # blank
+    _bg(slide, NAVY)
+    _rect(slide, 0, 3.7, 10, 0.85, BLUE)
+    _box(slide, 0.5, 0.5, 9, 1.1,
+         "📊 주식 AI 투자 브리핑", font_size=38, bold=True, color=WHITE, align=PP_ALIGN.LEFT)
+    _box(slide, 0.5, 1.65, 9, 0.5,
+         "AI Investment Briefing Report", font_size=17, italic=True, color=LBLUE)
+    _box(slide, 0.5, 2.3, 9, 0.55,
+         f"{persona_emoji} {persona_label}", font_size=19, bold=True, color=GOLD)
+    _box(slide, 0.5, 3.75, 9, 0.5,
+         f"기준일: {today}", font_size=15, color=WHITE, align=PP_ALIGN.CENTER)
+    _box(slide, 0.5, 5.1, 9, 0.35,
+         "본 리포트는 AI 분석 기반이며 투자 결정은 본인 책임입니다.",
+         font_size=10, italic=True, color=LGRAY, align=PP_ALIGN.CENTER)
+
+
+def _slide_portfolio_table(prs, stocks, today):
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _bg(slide, BG)
+    _rect(slide, 0, 0, 10, 0.85, NAVY)
+    _box(slide, 0.3, 0.1, 8, 0.65,
+         "📈 포트폴리오 종목 현황", font_size=22, bold=True, color=WHITE)
+    _box(slide, 8.0, 0.1, 1.8, 0.65,
+         today, font_size=11, color=LGRAY, align=PP_ALIGN.RIGHT)
+
+    # 표 헤더 배경
+    cols_x  = [0.3, 3.3, 4.9, 6.5, 8.2]
+    cols_w  = [3.0, 1.6, 1.6, 1.7, 1.5]
+    headers = ["종목명", "코드/티커", "종가", "등락률", "시장"]
+    row_h   = 0.38
+    header_y = 0.95
+
+    _rect(slide, 0.3, header_y, 9.5, row_h, BLUE)
+    for i, (hdr, cx, cw) in enumerate(zip(headers, cols_x, cols_w)):
+        _box(slide, cx, header_y + 0.04, cw, row_h - 0.06,
+             hdr, font_size=12, bold=True, color=WHITE,
+             align=PP_ALIGN.CENTER if i > 0 else PP_ALIGN.LEFT)
+
+    for row_idx, s in enumerate(stocks[:10]):
+        ry = header_y + row_h * (row_idx + 1)
+        bg_c = RGBColor(0xE8, 0xF0, 0xFE) if row_idx % 2 == 0 else WHITE
+        _rect(slide, 0.3, ry, 9.5, row_h, bg_c)
+
+        name   = s.get("name", s["ticker"])[:18]
+        ticker = s["ticker"]
+        close  = s.get("close")
+        change = s.get("change_rate")
+        market = s.get("market", "")
+        currency   = "원" if market == "KR" else "$"
+        close_str  = f"{close:,.0f}{currency}" if close else "N/A"
+        change_str = f"{change:+.2f}%" if change is not None else "N/A"
+        clr = _change_color(change)
+
+        vals   = [name, ticker, close_str, change_str, market]
+        aligns = [PP_ALIGN.LEFT, PP_ALIGN.CENTER, PP_ALIGN.RIGHT,
+                  PP_ALIGN.RIGHT, PP_ALIGN.CENTER]
+        colors = [DARK, DARK, DARK, clr, DARK]
+        bolds  = [False, False, False, True, False]
+
+        for i, (val, align, color, bold) in enumerate(zip(vals, aligns, colors, bolds)):
+            _box(slide, cols_x[i], ry + 0.04, cols_w[i], row_h - 0.06,
+                 val, font_size=11, bold=bold, color=color, align=align)
+
+
+def _slide_strategy(prs, portfolio_brief, persona_label, persona_emoji):
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _bg(slide, BG)
+    _rect(slide, 0, 0, 10, 0.85, BLUE)
+    _box(slide, 0.3, 0.1, 7.5, 0.65,
+         "📋 포트폴리오 종합 전략", font_size=22, bold=True, color=WHITE)
+    _box(slide, 7.8, 0.1, 2.0, 0.65,
+         f"{persona_emoji}", font_size=20, color=GOLD, align=PP_ALIGN.RIGHT)
+
+    # 본문 파싱
+    raw_lines = [l.strip() for l in portfolio_brief.split("\n") if l.strip()][:16]
+    text_lines = []
+    for line in raw_lines:
+        is_bold = (line.startswith("**") or line.startswith("##") or
+                   (len(line) > 2 and line[1] == "." and line[0].isdigit()))
+        clean = _clean(line, 130)
+        if clean:
+            text_lines.append((clean, is_bold, 13 if is_bold else 12,
+                                BLUE if is_bold else DARK))
+
+    _multiline_box(slide, 0.4, 1.0, 9.2, 4.4, text_lines[:14])
+
+
+def _slide_stock(prs, stock, brief, idx, total, today):
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _bg(slide, BG)
+
+    name   = stock.get("name", stock["ticker"])
+    ticker = stock["ticker"]
+    close  = stock.get("close")
+    change = stock.get("change_rate")
+    market = stock.get("market", "")
+    currency   = "원" if market == "KR" else "$"
+    close_str  = f"{close:,.0f}{currency}" if close else "N/A"
+    change_str = f"{change:+.2f}%" if change is not None else "N/A"
+    flag  = "🇰🇷" if market == "KR" else "🇺🇸"
+    clr   = _change_color(change)
+
+    # 헤더 바
+    _rect(slide, 0, 0, 10, 0.85, NAVY)
+    _box(slide, 0.3, 0.08, 6.5, 0.45,
+         f"{flag} {name} ({ticker})", font_size=20, bold=True, color=WHITE)
+    _box(slide, 0.3, 0.52, 4, 0.3,
+         f"{market}  |  {today}", font_size=11, color=LBLUE)
+
+    # 종가 박스 (우상단)
+    _rect(slide, 7.2, 0.08, 2.6, 0.72, BLUE)
+    _box(slide, 7.2, 0.08, 2.6, 0.38,
+         close_str, font_size=17, bold=True, color=WHITE, align=PP_ALIGN.CENTER)
+    _box(slide, 7.2, 0.46, 2.6, 0.34,
+         change_str, font_size=15, bold=True, color=clr, align=PP_ALIGN.CENTER)
+
+    # 좌측: AI 분석 요약
+    raw_lines = [l.strip() for l in brief.split("\n") if l.strip()][:12]
+    text_lines = []
+    for line in raw_lines:
+        is_bold = (line.startswith("**") or line.startswith("##") or
+                   (len(line) > 2 and line[1] == "." and line[0].isdigit()))
+        clean = _clean(line, 110)
+        if clean:
+            text_lines.append((clean, is_bold, 12 if is_bold else 11,
+                                BLUE if is_bold else DARK))
+
+    _box(slide, 0.3, 0.95, 5.2, 0.3,
+         "AI 분석 요약", font_size=12, bold=True, color=BLUE)
+    _multiline_box(slide, 0.3, 1.28, 5.2, 4.0, text_lines[:11])
+
+    # 우측: 주가 추이 (텍스트 형태)
+    hist = stock.get("history", {})
+    chart_lines = [("📊 주가 추이", True, 12, BLUE)]
+    for period, label in [("week", "이번주"), ("month", "이번달"), ("6month", "6개월")]:
+        df = hist.get(period)
+        if df is not None and not df.empty and "close" in df.columns:
+            sp = float(df["close"].iloc[0])
+            ep = float(df["close"].iloc[-1])
+            ch = (ep - sp) / sp * 100 if sp else 0
+            arrow = "▲" if ch > 0 else "▼" if ch < 0 else "─"
+            c = RED if ch > 0 else LBLUE if ch < 0 else LGRAY
+            chart_lines.append((f"{label}: {sp:,.0f}→{ep:,.0f} {arrow}{ch:+.1f}%",
+                                 False, 11, c))
+        else:
+            chart_lines.append((f"{label}: 데이터 없음", False, 10, LGRAY))
+
+    _multiline_box(slide, 5.7, 0.95, 4.1, 1.8, chart_lines)
+
+    # 수급 정보
+    investor = stock.get("investor", {})
+    if investor:
+        inv_lines = [("💹 수급 현황", True, 12, BLUE)]
+        for k, label in [("외국인합계","외국인"), ("기관합계","기관"), ("개인","개인")]:
+            val = investor.get(k)
+            if val is not None:
+                c = RED if val > 0 else LBLUE
+                inv_lines.append((f"{label}: {val:+,}원", False, 10, c))
+        _multiline_box(slide, 5.7, 2.9, 4.1, 1.5, inv_lines)
+
+    # 슬라이드 번호
+    _box(slide, 0.3, 5.3, 9.4, 0.25,
+         f"({idx+1}/{total}) {name}", font_size=9, color=LGRAY, align=PP_ALIGN.RIGHT)
+
+
+def _slide_ending(prs, persona_label, persona_emoji, today):
+    slide = prs.slides.add_slide(prs.slide_layouts[6])
+    _bg(slide, NAVY)
+    _box(slide, 0.5, 1.6, 9, 1.2,
+         "감사합니다", font_size=44, bold=True, color=WHITE, align=PP_ALIGN.CENTER)
+    _box(slide, 0.5, 2.9, 9, 0.65,
+         f"{persona_emoji} {persona_label}", font_size=20, bold=True,
+         color=GOLD, align=PP_ALIGN.CENTER)
+    _box(slide, 0.5, 4.7, 9, 0.4,
+         "본 리포트는 AI 분석 기반이며 투자 결정은 본인 책임입니다.",
+         font_size=12, italic=True, color=LGRAY, align=PP_ALIGN.CENTER)
+    _box(slide, 0.5, 5.15, 9, 0.3,
+         f"기준일: {today}", font_size=11, color=GRAY, align=PP_ALIGN.CENTER)
+
+
+# ── 메인 내보내기 ────────────────────────────────────────────────────────────
 
 def export_ppt(
     stocks: list[dict],
@@ -26,292 +303,37 @@ def export_ppt(
     output_path: str,
 ) -> str:
     today = date.today().isoformat()
+    prs = Presentation()
+    prs.slide_width  = Inches(10)
+    prs.slide_height = Inches(5.625)
 
-    # 슬라이드 1 — 표지
-    slide1 = f"""
-  // ── 슬라이드 1: 표지 ──────────────────────────────────────────────────
-  let s1 = pres.addSlide();
-  s1.background = {{ color: "0D1B4B" }};
-  s1.addShape(pres.shapes.RECTANGLE, {{ x: 0, y: 3.8, w: 10, h: 1.0, fill: {{ color: "1565C0" }} }});
-  s1.addText("📊 주식 AI 투자 브리핑", {{
-    x: 0.5, y: 0.6, w: 9, h: 1.1,
-    fontSize: 40, bold: true, color: "FFFFFF", fontFace: "Malgun Gothic"
-  }});
-  s1.addText("AI Investment Briefing Report", {{
-    x: 0.5, y: 1.7, w: 9, h: 0.5,
-    fontSize: 18, color: "90CAF9", fontFace: "Calibri", italic: true
-  }});
-  s1.addText("{_safe(persona_emoji + " " + persona_label)}", {{
-    x: 0.5, y: 2.4, w: 9, h: 0.55,
-    fontSize: 20, bold: true, color: "FFD54F", fontFace: "Malgun Gothic"
-  }});
-  s1.addText("기준일: {today}", {{
-    x: 0.5, y: 3.85, w: 9, h: 0.5,
-    fontSize: 16, color: "FFFFFF", fontFace: "Malgun Gothic", align: "center"
-  }});
-  s1.addText("본 리포트는 AI 분석 기반이며 투자 결정은 본인 책임입니다.", {{
-    x: 0.5, y: 5.15, w: 9, h: 0.35,
-    fontSize: 11, color: "78909C", fontFace: "Malgun Gothic", align: "center"
-  }});
-"""
+    _slide_cover(prs, today, persona_label, persona_emoji)
+    _slide_portfolio_table(prs, stocks, today)
+    _slide_strategy(prs, portfolio_brief, persona_label, persona_emoji)
 
-    # 슬라이드 2 — 포트폴리오 현황 테이블
-    table_rows = [
-        [
-            { "text": "종목명", "options": { "bold": True, "color": "FFFFFF", "fill": { "color": "1565C0" } } },
-            { "text": "코드", "options": { "bold": True, "color": "FFFFFF", "fill": { "color": "1565C0" } } },
-            { "text": "종가", "options": { "bold": True, "color": "FFFFFF", "fill": { "color": "1565C0" } } },
-            { "text": "등락률", "options": { "bold": True, "color": "FFFFFF", "fill": { "color": "1565C0" } } },
-            { "text": "시장", "options": { "bold": True, "color": "FFFFFF", "fill": { "color": "1565C0" } } },
-        ]
-    ]
-    for s in stocks[:10]:
-        close = s.get("close")
-        change = s.get("change_rate")
-        currency = "원" if s.get("market") == "KR" else "$"
-        close_str = f"{close:,.0f}{currency}" if close else "N/A"
-        change_str = f"{change:+.2f}%" if change is not None else "N/A"
-        clr = _change_color(change)
-        table_rows.append([
-            s.get("name", s["ticker"]),
-            s["ticker"],
-            close_str,
-            { "text": change_str, "options": { "color": clr, "bold": True } },
-            s.get("market", ""),
-        ])
+    for idx, (stock, brief) in enumerate(zip(stocks, stock_briefs)):
+        _slide_stock(prs, stock, brief, idx, len(stocks), today)
 
-    table_rows_js = "[\n"
-    for row in table_rows:
-        row_js = "    [\n"
-        for cell in row:
-            if isinstance(cell, dict):
-                txt = _safe(cell["text"])
-                opts = cell.get("options", {})
-                bold_str = "true" if opts.get("bold") else "false"
-                color_str = opts.get("color", "1E1E1E")
-                fill_color = opts.get("fill", {}).get("color", "")
-                if fill_color:
-                    row_js += f'      {{ text: `{txt}`, options: {{ bold: {bold_str}, color: "{color_str}", fill: {{ color: "{fill_color}" }} }} }},\n'
-                else:
-                    row_js += f'      {{ text: `{txt}`, options: {{ bold: {bold_str}, color: "{color_str}" }} }},\n'
-            else:
-                row_js += f'      `{_safe(str(cell))}`,\n'
-        row_js += "    ],\n"
-        table_rows_js += row_js
-    table_rows_js += "  ]"
+    _slide_ending(prs, persona_label, persona_emoji, today)
 
-    table_h = min(0.42 * (len(stocks) + 1), 4.0)
+    prs.save(output_path)
+    return output_path
 
-    slide2 = f"""
-  // ── 슬라이드 2: 포트폴리오 현황 ────────────────────────────────────────
-  let s2 = pres.addSlide();
-  s2.background = {{ color: "F8FAFF" }};
-  s2.addShape(pres.shapes.RECTANGLE, {{ x: 0, y: 0, w: 10, h: 0.9, fill: {{ color: "0D1B4B" }} }});
-  s2.addText("📈 포트폴리오 종목 현황", {{
-    x: 0.3, y: 0.1, w: 9.4, h: 0.7,
-    fontSize: 24, bold: true, color: "FFFFFF", fontFace: "Malgun Gothic"
-  }});
-  s2.addTable({table_rows_js}, {{
-    x: 0.3, y: 1.05, w: 9.4, h: {table_h},
-    colW: [2.8, 1.4, 1.8, 1.5, 0.9],
-    border: {{ pt: 1, color: "CCCCCC" }},
-    fontFace: "Malgun Gothic", fontSize: 13,
-    align: "center"
-  }});
-  s2.addText("기준일: {today}", {{
-    x: 0.3, y: 5.3, w: 9.4, h: 0.3,
-    fontSize: 11, color: "90A4AE", fontFace: "Malgun Gothic", align: "right"
-  }});
-"""
 
-    # 슬라이드 3 — 포트폴리오 종합 전략 요약
-    port_summary = portfolio_brief[:600].replace("`", "'").replace("\\", "\\\\").replace("${", "\\${")
-    # 줄바꿈을 배열 항목으로 변환
-    port_lines = [l.strip() for l in port_summary.split("\n") if l.strip()][:12]
-    port_text_items = ""
-    for line in port_lines:
-        clean = line.replace("**", "").replace("##", "").strip()
-        is_heading = line.startswith("**") or line.startswith("##") or line.startswith("1.") or line.startswith("2.")
-        bold_str = "true" if is_heading else "false"
-        port_text_items += f'  {{ text: `{_safe(clean, 150)}`, options: {{ breakLine: true, bold: {bold_str}, fontSize: {14 if is_heading else 13} }} }},\n'
-
-    slide3 = f"""
-  // ── 슬라이드 3: 종합 전략 요약 ──────────────────────────────────────────
-  let s3 = pres.addSlide();
-  s3.background = {{ color: "F8FAFF" }};
-  s3.addShape(pres.shapes.RECTANGLE, {{ x: 0, y: 0, w: 10, h: 0.9, fill: {{ color: "1565C0" }} }});
-  s3.addText("📋 포트폴리오 종합 전략", {{
-    x: 0.3, y: 0.1, w: 7, h: 0.7,
-    fontSize: 24, bold: true, color: "FFFFFF", fontFace: "Malgun Gothic"
-  }});
-  s3.addText("{_safe(persona_emoji + " " + persona_label, 60)}", {{
-    x: 7.0, y: 0.15, w: 2.7, h: 0.6,
-    fontSize: 13, color: "FFD54F", fontFace: "Malgun Gothic", align: "right"
-  }});
-  s3.addShape(pres.shapes.RECTANGLE, {{
-    x: 0.3, y: 1.05, w: 9.4, h: 4.3,
-    fill: {{ color: "FFFFFF" }},
-    shadow: {{ type: "outer", color: "000000", blur: 8, offset: 2, angle: 135, opacity: 0.08 }}
-  }});
-  s3.addText([
-{port_text_items}
-  ], {{
-    x: 0.5, y: 1.15, w: 9.0, h: 4.1,
-    fontFace: "Malgun Gothic", fontSize: 13, color: "1A237E", valign: "top"
-  }});
-"""
-
-    # 슬라이드 4+ — 종목별 개별 분석 (최대 10개)
-    stock_slides = ""
-    for idx, (stock, brief) in enumerate(zip(stocks[:10], stock_briefs[:10])):
-        name = _safe(stock.get("name", stock["ticker"]), 30)
-        ticker = _safe(stock["ticker"], 15)
-        close = stock.get("close")
-        change = stock.get("change_rate")
-        market = stock.get("market", "")
-        currency = "원" if market == "KR" else "$"
-        close_str = _safe(f"{close:,.0f}{currency}" if close else "N/A")
-        change_str = _safe(f"{change:+.2f}%" if change is not None else "N/A")
-        clr = _change_color(change)
-        flag = "🇰🇷" if market == "KR" else "🇺🇸"
-
-        # 브리핑 요약 (첫 600자)
-        brief_lines = [l.strip() for l in brief[:600].split("\n") if l.strip()][:10]
-        brief_items = ""
-        for line in brief_lines:
-            clean = line.replace("**", "").replace("##", "").strip()
-            is_bold = line.startswith("**") or line.startswith("##") or (len(line) > 2 and line[1] == ".")
-            bold_str = "true" if is_bold else "false"
-            brief_items += f'    {{ text: `{_safe(clean, 120)}`, options: {{ breakLine: true, bold: {bold_str}, fontSize: {13 if is_bold else 12} }} }},\n'
-
-        # 주가 추이 히스토리 데이터 (주간)
-        hist_week = stock.get("history", {}).get("week")
-        chart_data_str = ""
-        chart_code = ""
-        if hist_week is not None and not hist_week.empty and "close" in hist_week.columns:
-            vals = [round(float(v), 0) for v in hist_week["close"].values[-7:]]
-            labels = [str(d)[:10] for d in hist_week.index[-7:]]
-            vals_js = ", ".join(str(v) for v in vals)
-            labels_js = ", ".join(f'"{l}"' for l in labels)
-            chart_color = "EF5350" if (change or 0) >= 0 else "42A5F5"
-            chart_code = f"""
-  s{idx+4}.addChart(pres.charts.LINE, [{{
-    name: "{name}", labels: [{labels_js}], values: [{vals_js}]
-  }}], {{
-    x: 5.8, y: 1.05, w: 4.0, h: 2.8,
-    chartColors: ["{chart_color}"],
-    chartArea: {{ fill: {{ color: "FFFFFF" }}, roundedCorners: true }},
-    catAxisLabelColor: "90A4AE", valAxisLabelColor: "90A4AE",
-    valGridLine: {{ color: "E8EAF6", size: 0.5 }},
-    catGridLine: {{ style: "none" }},
-    lineSize: 2, lineSmooth: true,
-    showLegend: false,
-    showTitle: true, title: "이번주 주가 추이",
-    titleFontSize: 12, titleColor: "37474F"
-  }});"""
-
-        stock_slides += f"""
-  // ── 슬라이드 {idx+4}: {name} ──────────────────────────────────────────
-  let s{idx+4} = pres.addSlide();
-  s{idx+4}.background = {{ color: "F8FAFF" }};
-  s{idx+4}.addShape(pres.shapes.RECTANGLE, {{ x: 0, y: 0, w: 10, h: 0.9, fill: {{ color: "0D1B4B" }} }});
-  s{idx+4}.addText("{flag} {name} ({ticker})", {{
-    x: 0.3, y: 0.05, w: 7, h: 0.5,
-    fontSize: 22, bold: true, color: "FFFFFF", fontFace: "Malgun Gothic"
-  }});
-  s{idx+4}.addText("{market} | {today}", {{
-    x: 0.3, y: 0.55, w: 7, h: 0.32,
-    fontSize: 12, color: "90CAF9", fontFace: "Malgun Gothic"
-  }});
-  s{idx+4}.addShape(pres.shapes.RECTANGLE, {{
-    x: 7.3, y: 0.08, w: 2.4, h: 0.75,
-    fill: {{ color: "1565C0" }}
-  }});
-  s{idx+4}.addText("{close_str}", {{
-    x: 7.3, y: 0.08, w: 2.4, h: 0.42,
-    fontSize: 18, bold: true, color: "FFFFFF", fontFace: "Malgun Gothic", align: "center"
-  }});
-  s{idx+4}.addText("{change_str}", {{
-    x: 7.3, y: 0.5, w: 2.4, h: 0.33,
-    fontSize: 15, bold: true, color: "{clr}", fontFace: "Malgun Gothic", align: "center"
-  }});
-  s{idx+4}.addShape(pres.shapes.RECTANGLE, {{
-    x: 0.3, y: 1.05, w: 5.3, h: 4.3,
-    fill: {{ color: "FFFFFF" }},
-    shadow: {{ type: "outer", color: "000000", blur: 6, offset: 2, angle: 135, opacity: 0.08 }}
-  }});
-  s{idx+4}.addText("AI 분석 요약", {{
-    x: 0.4, y: 1.1, w: 5.1, h: 0.35,
-    fontSize: 13, bold: true, color: "1565C0", fontFace: "Malgun Gothic"
-  }});
-  s{idx+4}.addText([
-{brief_items}
-  ], {{
-    x: 0.4, y: 1.5, w: 5.1, h: 3.75,
-    fontFace: "Malgun Gothic", fontSize: 12, color: "1A237E", valign: "top"
-  }});
-{chart_code}
-  s{idx+4}.addText("({idx+1}/{len(stocks)}) {name}", {{
-    x: 0.3, y: 5.3, w: 9.4, h: 0.28,
-    fontSize: 10, color: "90A4AE", fontFace: "Malgun Gothic", align: "right"
-  }});
-"""
-
-    # 마지막 슬라이드 — 면책 고지
-    last_idx = len(stocks) + 4
-    slide_last = f"""
-  // ── 마지막 슬라이드: 면책 고지 ──────────────────────────────────────────
-  let s_last = pres.addSlide();
-  s_last.background = {{ color: "0D1B4B" }};
-  s_last.addShape(pres.shapes.RECTANGLE, {{ x: 1.5, y: 1.5, w: 7, h: 0.08, fill: {{ color: "1565C0" }} }});
-  s_last.addText("감사합니다", {{
-    x: 0.5, y: 1.8, w: 9, h: 1.2,
-    fontSize: 44, bold: true, color: "FFFFFF", fontFace: "Malgun Gothic", align: "center"
-  }});
-  s_last.addText("{_safe(persona_emoji + " " + persona_label)}", {{
-    x: 0.5, y: 3.1, w: 9, h: 0.6,
-    fontSize: 20, color: "FFD54F", fontFace: "Malgun Gothic", align: "center"
-  }});
-  s_last.addText("본 리포트는 AI 분석 기반이며 투자 결정은 본인 책임입니다.", {{
-    x: 0.5, y: 4.8, w: 9, h: 0.4,
-    fontSize: 13, color: "90A4AE", fontFace: "Malgun Gothic", align: "center"
-  }});
-  s_last.addText("기준일: {today}", {{
-    x: 0.5, y: 5.2, w: 9, h: 0.3,
-    fontSize: 12, color: "546E7A", fontFace: "Malgun Gothic", align: "center"
-  }});
-"""
-
-    js_code = f"""
-const pptxgen = require("pptxgenjs");
-let pres = new pptxgen();
-pres.layout = 'LAYOUT_16x9';
-pres.author = 'Stock AI Briefing';
-pres.title = '주식 AI 투자 브리핑 {today}';
-pres.subject = '{_safe(persona_label)}';
-{slide1}
-{slide2}
-{slide3}
-{stock_slides}
-{slide_last}
-
-pres.writeFile({{ fileName: `{output_path}` }})
-  .then(() => console.log('OK'))
-  .catch(e => {{ console.error('ERR', e.message); process.exit(1); }});
-"""
-
-    with tempfile.NamedTemporaryFile(suffix=".js", mode="w", delete=False, encoding="utf-8") as f:
-        f.write(js_code)
-        js_file = f.name
-
+def export_ppt_bytes(
+    stocks: list[dict],
+    stock_briefs: list[str],
+    portfolio_brief: str,
+    persona_label: str,
+    persona_emoji: str,
+) -> bytes:
+    """바이트로 반환 (Streamlit download_button용)."""
+    import tempfile, os
+    with tempfile.NamedTemporaryFile(suffix=".pptx", delete=False) as f:
+        tmp = f.name
     try:
-        result = subprocess.run(
-            ["node", js_file],
-            capture_output=True, text=True, timeout=90,
-            env={**os.environ, "NODE_PATH": "/home/claude/.npm-global/lib/node_modules"},
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"Node 오류: {result.stderr[:400]}")
-        return output_path
+        export_ppt(stocks, stock_briefs, portfolio_brief,
+                   persona_label, persona_emoji, tmp)
+        return open(tmp, "rb").read()
     finally:
-        os.unlink(js_file)
+        os.unlink(tmp)
